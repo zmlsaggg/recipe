@@ -1,13 +1,48 @@
 # recipe
 
-## Установка через PyPI
+## Установка через pip
 
-```bash
-python -m pip install recipe-finder
+Нужен Python 3.9 или новее. Пакет называется `recipe-finder`, а после установки запускается командой `recipe-finder`. Дополнительные Python-зависимости не нужны.
+
+### Windows (PowerShell)
+
+```powershell
+py -m pip install --upgrade recipe-finder
 recipe-finder
 ```
 
-Утилита не требует сторонних Python-зависимостей: достаточно Python 3.9 или новее.
+### Linux и macOS
+
+```sh
+python3 -m pip install --upgrade recipe-finder
+recipe-finder
+```
+
+Если система не разрешает установку в системный Python, используй отдельное виртуальное окружение:
+
+```powershell
+# Windows
+py -m venv .venv
+.venv\Scripts\Activate.ps1
+```
+
+```sh
+# Linux / macOS
+python3 -m venv .venv
+source .venv/bin/activate
+```
+
+После активации окружения:
+
+```sh
+python -m pip install --upgrade recipe-finder
+recipe-finder -q борщ
+```
+
+Обновить пакет: `python -m pip install --upgrade recipe-finder`. Удалить: `python -m pip uninstall recipe-finder`.
+Для изолированной установки CLI можно использовать `pipx install recipe-finder`.
+
+## Запуск из исходников
 
 
 Консольная тулза, которая **при запуске парсит базы рецептов** с нескольких
