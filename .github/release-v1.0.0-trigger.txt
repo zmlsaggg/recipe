@@ -1,0 +1,6 @@
+Release train: v1.0.0
+
+This commit intentionally triggers the tagged release workflow from release/v1.0.0.
+The workflow builds the wheel/sdist, publishes to the configured PyPI Trusted Publisher,
+and creates a GitHub Release with the source archive, Python entry script, launcher,
+and Windows executable.
