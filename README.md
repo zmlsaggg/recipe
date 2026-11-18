@@ -1,4 +1,15 @@
-# recipe
+# Recipe Finder
+
+<p align="center">
+  Собери локальный каталог рецептов из нескольких источников и находи нужные блюда через быстрый интерактивный поиск.
+</p>
+
+<p align="center">
+  <a href="https://pypi.org/project/recipe-finder/"><img src="https://img.shields.io/pypi/v/recipe-finder?style=flat-square&logo=pypi&logoColor=white&label=PyPI&color=F59E0B" alt="PyPI version"></a>
+  <a href="https://github.com/zmlsaggg/recipe/releases/latest"><img src="https://img.shields.io/github/v/release/zmlsaggg/recipe?style=flat-square&logo=github&label=release&color=D97706" alt="Latest release"></a>
+  <img src="https://img.shields.io/badge/Python-3.9%2B-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python 3.9+">
+  <a href="https://github.com/zmlsaggg/recipe/releases/latest"><img src="https://img.shields.io/badge/Windows-EXE-0078D4?style=flat-square&logo=windows&logoColor=white" alt="Windows executable"></a>
+</p>
 
 ## Установка через pip
 
