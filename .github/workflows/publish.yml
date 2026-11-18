@@ -1,23 +1,26 @@
-name: Publish to PyPI
+name: Build, publish to PyPI, and create GitHub release
 
 on:
   push:
+    branches:
+      - "release/v1.0.0"
     tags:
       - "v*"
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
   build:
-    name: Build and validate distributions
+    name: Test and build Python distributions
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Build and smoke-test
+      - name: Test and build package
         run: |
           python -m pip install --upgrade pip build twine
           python -m compileall -q recipe.py
@@ -25,19 +28,59 @@ jobs:
           python -m twine check dist/*
           python -m pip install dist/*.whl
           recipe-finder --demo --stats
+      - name: Prepare source and script release assets
+        run: |
+          mkdir -p release-assets
+          git archive --format=zip --prefix=recipe-finder/ HEAD > release-assets/recipe-finder-source.zip
+          cp recipe.py release-assets/recipe-finder.py
+          cp README.md pyproject.toml release-assets/
+          cat > release-assets/run-recipe-finder.bat <<'BAT'
+          @echo off
+          chcp 65001 >nul
+          cd /d "%~dp0"
+          if exist "%~dp0recipe-finder.exe" (
+            "%~dp0recipe-finder.exe" %*
+          ) else (
+            py -3 "%~dp0recipe-finder.py" %*
+            if errorlevel 1 python "%~dp0recipe-finder.py" %*
+          )
+          BAT
       - uses: actions/upload-artifact@v4
         with:
           name: python-package-distributions
           path: dist/
           retention-days: 7
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-source-assets
+          path: release-assets/
+          retention-days: 7
+
+  windows-executable:
+    name: Build Windows executable
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build one-file executable
+        run: |
+          python -m pip install --upgrade pip pyinstaller
+          pyinstaller --clean --onefile --name recipe-finder recipe.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-executable
+          path: dist/recipe-finder.exe
+          retention-days: 7
 
   publish:
-    name: Publish distribution to PyPI
+    name: Publish to PyPI using Trusted Publishing
     needs: build
     runs-on: ubuntu-latest
     environment:
       name: pypi
-      url: https://pypi.org/p/recipe-finder
+      url: https://pypi.org/project/recipe-finder/
     permissions:
       id-token: write
     steps:
@@ -46,3 +89,28 @@ jobs:
           name: python-package-distributions
           path: dist/
       - uses: pypa/gh-action-pypi-publish@release/v1
+
+  github-release:
+    name: Create GitHub release with source and executable
+    needs: [build, windows-executable]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-source-assets
+          path: release-assets/
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-executable
+          path: release-assets/
+      - name: Create release and upload downloads
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'v1.0.0' }}
+          name: Recipe Finder v1.0.0
+          target_commitish: ${{ github.sha }}
+          generate_release_notes: true
+          files: |
+            release-assets/*
