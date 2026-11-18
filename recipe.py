@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import csv
 import difflib
 import gzip
 import hashlib
@@ -139,6 +140,22 @@ BUILTIN_SOURCES = {
         "seeds": ["https://webspoon.ru/sitemap.xml", "https://webspoon.ru/recipes"],
         "allow": [r"^/rec(?:ipe|ipes)/[^/?#]+/?$"],
         "catalog": [r"^/recipes/?(?:\?.*)?$"],
+        "max_pages": 60,
+        "max_recipes": 4000,
+    },
+    "gotovim-doma.ru": {
+        "seeds": ["https://gotovim-doma.ru/sitemap.xml",
+                  "https://gotovim-doma.ru/recipes"],
+        "allow": [r"^/recipe/[^/?#]+/?$", r"^/recipes/[^/?#]+/?$"],
+        "catalog": [r"^/recipes/?(?:\?.*)?$"],
+        "max_pages": 60,
+        "max_recipes": 4000,
+    },
+    "gastronom.ru": {
+        "seeds": ["https://www.gastronom.ru/sitemap.xml",
+                  "https://www.gastronom.ru/recipe"],
+        "allow": [r"^/recipe/[^/?#]+/?$"],
+        "catalog": [r"^/recipe/?(?:\?.*)?$"],
         "max_pages": 60,
         "max_recipes": 4000,
     },
@@ -393,6 +410,7 @@ def title_from_url(url: str) -> str:
     last = urllib.parse.unquote(last)
     last = re.sub(r"[-_+]+", " ", last).strip()
     last = re.sub(r"\s+", " ", last)
+    last = polish_title(last)
     return last or url
 
 
@@ -407,8 +425,25 @@ def clean_title(text: str) -> str:
     return t
 
 
+TITLE_JUNK_TAIL = re.compile(
+    r"\s+[—–-]\s+(?:пошаговый\s+|классический\s+|домашний\s+|простой\s+)?"
+    r"(?:рецепт|рецепты|recipe).*$", re.I)
+TITLE_SITE_TAIL = re.compile(
+    r"\s*[|•·]\s*[^|•·]{0,45}?(?:рецепт|recipe|еда|едим|gotovim|\.ru|\.com|\.net)"
+    r"[^|•·]*$", re.I)
+
+
+def polish_title(t: str) -> str:
+    """Срезает хвосты вида „ — пошаговый рецепт“ или „| Еда.ру“."""
+    t = clean_title(t)
+    t = TITLE_JUNK_TAIL.sub("", t)
+    t = TITLE_SITE_TAIL.sub("", t)
+    t = re.sub(r"\s+", " ", t).strip().strip(" -|•·")
+    return t
+
+
 def usable_title(text: str) -> str:
-    t = clean_title(text)
+    t = polish_title(text)
     if len(t) < 4:
         return ""
     if t.lower() in BAD_TITLES:
@@ -419,6 +454,23 @@ def usable_title(text: str) -> str:
 def norm_text(s: str) -> str:
     s = unicodedata.normalize("NFKC", s or "").lower().replace("ё", "е")
     return re.sub(r"\s+", " ", s).strip()
+
+
+# Транслитерация: чтобы по запросу «borsch» находился «Борщ», и наоборот.
+TRANS = {
+    "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "e",
+    "ж": "zh", "з": "z", "и": "i", "й": "y", "к": "k", "л": "l", "м": "m",
+    "н": "n", "о": "o", "п": "p", "р": "r", "с": "s", "т": "t", "у": "u",
+    "ф": "f", "х": "kh", "ц": "ts", "ч": "ch", "ш": "sh", "щ": "sch",
+    "ъ": "", "ы": "y", "ь": "", "э": "e", "ю": "yu", "я": "ya",
+}
+
+
+def translit(s: str) -> str:
+    out = []
+    for ch in (s or "").lower():
+        out.append(TRANS.get(ch, ch))
+    return "".join(out)
 
 
 # --------------------------------------------------------------------------- #
@@ -535,6 +587,22 @@ def looks_like_sitemap_url(url: str) -> bool:
     return urllib.parse.urlsplit(url).path.lower().endswith((".xml", ".xml.gz"))
 
 
+PAGINATION_TEXTS = {"дальше", "следующая", "следующий", "далее", "вперёд", "вперед",
+                    "ещё", "еще", "показать ещё", "показать еще", "more", "next",
+                    "next »", "»", ">>", "→", ">", "…"}
+
+
+def looks_like_pagination(href: str, txt: str) -> bool:
+    """Ссылки-„пагинаторы“: ?page=2, /page/2, „Дальше“, „Ещё“ и т.п."""
+    pq = pathq(href).lower()
+    if re.search(r"[?&](?:page|p|pg|offset|start)=\d+", pq):
+        return True
+    if re.search(r"/page/\d+", pq):
+        return True
+    t = clean_title(txt).lower()
+    return t in PAGINATION_TEXTS
+
+
 # --------------------------------------------------------------------------- #
 # Сканирование источника
 # --------------------------------------------------------------------------- #
@@ -575,7 +643,7 @@ def crawl_source(src: dict) -> dict:
         if looks_like_sitemap(text, url):
             log(f"{name}: sitemap {url}")
             for loc in parse_locs(text):
-                n = norm_url(loc)
+                n = norm_url(urllib.parse.urljoin(url, loc))
                 if not n or not same_host(n, host) or is_denied(n, deny):
                     continue
                 if (looks_like_sitemap_url(n) and depth < 2 and sm_fetches < 20
@@ -592,10 +660,15 @@ def crawl_source(src: dict) -> dict:
                 if not n or not same_host(n, host) or is_denied(n, deny):
                     continue
                 if matches_any(n, allow):
+                    # у источников с пустым allow пагинаторы — это страницы,
+                    # а не рецепты
+                    if not allow and looks_like_pagination(href, txt):
+                        pages.append((n, depth))
+                        continue
                     t = usable_title(txt) or title_from_url(n)
                     if len(t) >= 4:
                         found.setdefault(n, t)
-                elif matches_any(n, catalog):
+                elif matches_any(n, catalog) or looks_like_pagination(href, txt):
                     pages.append((n, depth))
     log(f"{name}: всего {len(found)} ссылок, {len(seen_pages)} страниц")
     return found
@@ -825,23 +898,40 @@ def search_recipes(recipes: list, query: str) -> list:
     q = norm_text(query)
     if not q:
         return []
-    scored = []
+    # Ищем и в исходной записи, и в транслите: «borsch» ↔ «борщ».
+    q_vars = {q, translit(q)}
     q_words = [w for w in q.split() if w]
+    q_words_t = [w for w in translit(q).split() if w]
+    scored = []
     for r in recipes:
         t = norm_text(r.title)
         if not t:
             continue
-        if q == t:
-            score = 200
-        elif t.startswith(q):
-            score = 150
-        elif q in t:
-            score = 120
-        elif q_words and all(w in t for w in q_words):
-            score = 100
-        else:
-            ratio = difflib.SequenceMatcher(None, q, t).ratio()
-            score = ratio * 80 if ratio >= 0.6 else 0
+        t_vars = {t, translit(t)}
+        score = 0
+        for tv in t_vars:
+            for qv in q_vars:
+                if qv == tv:
+                    score = max(score, 200)
+                elif tv.startswith(qv):
+                    score = max(score, 150)
+                elif qv in tv:
+                    score = max(score, 120)
+            if score:
+                break
+        if not score:
+            for tv in t_vars:
+                for words in (q_words, q_words_t):
+                    if words and all(w in tv for w in words):
+                        score = 100
+                        break
+                if score:
+                    break
+        if not score:
+            for tv in t_vars:
+                ratio = difflib.SequenceMatcher(None, q, tv).ratio()
+                if ratio >= 0.6:
+                    score = max(score, ratio * 80)
         if score:
             scored.append((score, r))
     scored.sort(key=lambda x: -x[0])
@@ -961,11 +1051,162 @@ def parse_meta(text: str) -> dict:
             "partial": True}
 
 
+class BlocksParser(HTMLParser):
+    """Собирает списки (<ul>/<ol>) и заголовки (h1-h4, strong, b) по порядку.
+
+    Нужен для запасного разбора страниц без JSON-LD: ищем заголовок
+    «Ингредиенты»/«Приготовление» и ближайший список после него.
+    """
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.blocks = []      # [{"seq", "tag", "items": [str]}]
+        self.headings = []    # [{"seq", "tag", "text"}]
+        self._stack = []
+        self._head = None
+        self._head_tag = None
+        self._head_seq = 0
+        self._skip = 0
+        self._seq = 0
+
+    def handle_starttag(self, tag, attrs):
+        tag = tag.lower()
+        if tag in ("script", "style", "noscript"):
+            self._skip += 1
+            return
+        if self._skip:
+            return
+        if tag in ("ul", "ol"):
+            if not self._stack:
+                self._stack.append({"tag": tag, "items": [], "cur": None,
+                                    "seq": self._seq})
+                self._seq += 1
+        elif tag == "li":
+            if self._stack:
+                self._stack[-1]["cur"] = []
+        elif tag in ("h1", "h2", "h3", "h4", "strong", "b"):
+            self._head = []
+            self._head_tag = tag
+            self._head_seq = self._seq
+            self._seq += 1
+
+    def handle_data(self, data):
+        if self._skip:
+            return
+        if self._stack and self._stack[-1]["cur"] is not None:
+            self._stack[-1]["cur"].append(data)
+        if self._head is not None:
+            self._head.append(data)
+
+    def handle_endtag(self, tag):
+        tag = tag.lower()
+        if tag in ("script", "style", "noscript"):
+            self._skip = max(0, self._skip - 1)
+            return
+        if tag == "li":
+            if self._stack:
+                cur = self._stack[-1]["cur"]
+                if cur is not None:
+                    txt = re.sub(r"\s+", " ", html.unescape("".join(cur))).strip()
+                    if txt:
+                        self._stack[-1]["items"].append(txt)
+                    self._stack[-1]["cur"] = None
+        elif tag in ("ul", "ol"):
+            if self._stack:
+                b = self._stack.pop()
+                if b["items"]:
+                    self.blocks.append({"seq": b["seq"], "tag": b["tag"],
+                                        "items": b["items"]})
+        elif tag in ("h1", "h2", "h3", "h4", "strong", "b"):
+            if self._head is not None:
+                txt = re.sub(r"\s+", " ", html.unescape("".join(self._head))).strip()
+                if txt:
+                    self.headings.append({"seq": self._head_seq, "tag": self._head_tag,
+                                          "text": txt})
+                self._head = None
+
+
+INGREDIENT_ANCHORS = ("ингредиент", "состав", "что понадобится", "вам понадобится",
+                      "продукты", "ingredients")
+STEP_ANCHORS = ("приготовление", "шаги", "инструкция", "готовим", "пошагово",
+                "рецепт приготовления", "способ приготовления", "instructions",
+                "method")
+
+
+def _list_after(headings, blocks, anchors, min_items=2):
+    for h in headings:
+        low = h["text"].lower()
+        if any(a in low for a in anchors):
+            for b in blocks:
+                if b["seq"] > h["seq"] and len(b["items"]) >= min_items:
+                    return b["items"]
+    return []
+
+
+def parse_html_recipe(text: str):
+    """Запасной разбор страницы рецепта без JSON-LD (эвристиками)."""
+    p = BlocksParser()
+    try:
+        p.feed(text)
+    except Exception:  # noqa: BLE001
+        return None
+    name = ""
+    for h in p.headings:
+        if h["tag"] == "h1" and h["text"]:
+            name = h["text"]
+            break
+    ingredients = _list_after(p.headings, p.blocks, INGREDIENT_ANCHORS, 2)
+    steps = _list_after(p.headings, p.blocks, STEP_ANCHORS, 2)
+    if not steps:
+        for b in p.blocks:
+            if b["tag"] == "ol" and len(b["items"]) >= 3:
+                steps = b["items"]
+                break
+    if not ingredients and not steps:
+        return None
+    return {"name": name, "description": "", "ingredients": ingredients,
+            "steps": steps, "partial": True}
+
+
+def details_cache_file(url: str) -> str:
+    h = hashlib.sha256(url.encode("utf-8")).hexdigest()[:20]
+    return os.path.join(cache_dir(), "details", h + ".json")
+
+
+def load_cached_details(url: str, max_age: float = 7 * 24 * 3600):
+    try:
+        path = details_cache_file(url)
+        if time.time() - os.path.getmtime(path) > max_age:
+            return None
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def save_cached_details(url: str, details: dict) -> None:
+    try:
+        path = details_cache_file(url)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(details, f, ensure_ascii=False)
+        os.replace(tmp, path)
+    except Exception as exc:  # noqa: BLE001
+        log(f"details cache save failed: {exc}")
+
+
 def fetch_details(url: str):
+    cached = load_cached_details(url)
+    if cached is not None:
+        return cached
     text = fetch(url)
     if not text:
         return None
-    return parse_jsonld(text) or parse_meta(text)
+    details = parse_jsonld(text) or parse_html_recipe(text) or parse_meta(text)
+    if details:
+        save_cached_details(url, details)
+    return details
 
 
 # --------------------------------------------------------------------------- #
@@ -1078,6 +1319,19 @@ def print_card(rec: Recipe, details: dict) -> None:
 # --------------------------------------------------------------------------- #
 # Режимы работы
 # --------------------------------------------------------------------------- #
+
+def export_recipes(recipes: list, path: str) -> None:
+    if path.lower().endswith(".csv"):
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            w.writerow(["title", "url", "site"])
+            for r in recipes:
+                w.writerow([r.title, r.url, r.site])
+    else:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump([r.to_dict() for r in recipes], f, ensure_ascii=False, indent=2)
+    print(f"Экспортировано {len(recipes)} рецептов в {path}")
+
 
 def run_query(recipes: list, args) -> int:
     results = search_recipes(recipes, args.query)
@@ -1215,6 +1469,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="показать встроенные источники и выйти")
     p.add_argument("--stats", action="store_true",
                    help="показать статистику базы и выйти")
+    p.add_argument("--deep", action="store_true",
+                   help="глубокий обход: поднять лимиты страниц и рецептов")
+    p.add_argument("--export", metavar="FILE",
+                   help="сохранить базу в JSON или CSV (по расширению) и выйти")
     p.add_argument("-v", "--verbose", action="store_true",
                    help="отладочный вывод")
     p.add_argument("--version", action="version",
@@ -1239,10 +1497,19 @@ def main(argv=None) -> int:
         return 0
 
     sources = resolve_sources(args)
+    if args.deep:
+        for s in sources:
+            s["max_pages"] = max(int(s.get("max_pages", 40)), 300)
+            s["max_recipes"] = max(int(s.get("max_recipes", 2000)), 20000)
+
     recipes, meta = build_index(sources, args)
 
     if args.stats:
         print_stats(recipes)
+        return 0
+
+    if args.export:
+        export_recipes(recipes, args.export)
         return 0
 
     if not meta.get("cached"):
